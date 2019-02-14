@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -160,8 +161,6 @@ public:
 
 				printf("}");
 				break;
-
-			default: break;
 			}
 
 			return true;
@@ -186,13 +185,12 @@ public:
 	};
 
 private:
-	std::vector<Node> m_nodes;     // we allocate nodes from here (allows for auto-cleanup)
-
+	std::vector<Node*> m_nodes;     // we allocate nodes from here (allows for easy cleanup)
 	ParseError m_lastError;        // error code from last call to Parse()
 	std::string m_lastErrorDesc;   // description of last error
 	//std::string m_lastErrorLine;   // line which contains the error
-	size_t m_lastErrorLineNo;         // current line number (starting at 1)
-	size_t m_lastErrorCharNo;         // offset in line since last newline (starting at 1)
+	size_t m_lastErrorLineNo;      // current line number (starting at 1)
+	size_t m_lastErrorCharNo;      // offset in line since last newline (starting at 1)
 
 public:
 	///////////////////////////////////////////////////////////////////////////
@@ -210,7 +208,7 @@ public:
 	}
 
 	///////////////////////////////////////////////////////////////////////////
-	inline Node const* GetRoot()                 { return (m_nodes.size() == 0 ? nullptr : &m_nodes[0]); }
+	inline Node const* GetRoot()                 { return (m_nodes.size() == 0 ? nullptr : m_nodes[0]); }
 	inline ParseError GetLastError()             { return m_lastError; }
 	inline const std::string& GetLastErrorDesc() { return m_lastErrorDesc; }
 
@@ -222,6 +220,7 @@ public:
 		switch (m_lastError)
 		{
 		case ParseError::None: printf("No error\n"); return;
+		case ParseError::InternalError: printf("Internal error\n"); return;
 		case ParseError::BadFormat: printf("BadFormat"); break;
 		case ParseError::BadNumberFormat: printf("BadNumberFormat"); break;
 		case ParseError::InvalidRoot: printf("InvalidRoot"); break;
@@ -234,7 +233,7 @@ public:
 		case ParseError::OutOfPlaceSquareBracket: printf("OutOfPlaceSquareBracket"); break;
 		}
 
-		printf(": (line %ld, char %ld) %s\n", (long)m_lastErrorLineNo, (long)m_lastErrorCharNo, m_lastErrorDesc.c_str());
+		printf(": (line %ld, char %ld) %s\n", long(m_lastErrorLineNo), long(m_lastErrorCharNo), m_lastErrorDesc.c_str());
 	}
 
 	///////////////////////////////////////////////////////////////////////////
@@ -339,15 +338,15 @@ private:
 		{
 			++m_lastErrorCharNo;
 
-			if (p[i] < 32 || p[i] >= 127) // invalid character
-				return -1;
-
 			if (p[i] == ':' || p[i] == '\t' || p[i] == '\r' || p[i] == '\n'
 			  || p[i] == ' ' || p[i] == ',' || p[i] == ']' || p[i] == '}')
 			{
 				result = std::string(&p[0], i);
 				return (i - 1); // don't include delimiter
 			}
+
+			if (p[i] < 32 || p[i] >= 127) // invalid character
+				return -1;
 		}
 
 		m_lastError = ParseError::BadFormat;
@@ -435,6 +434,9 @@ public:
 	void Parse(const char* str, size_t reserveNodes = 100)
 	{
 		// reset everything
+		for (auto p : m_nodes)
+			delete p;
+
 		m_nodes.clear();
 		m_nodes.reserve(reserveNodes);
 		m_lastError = ParseError::None;
@@ -488,14 +490,14 @@ public:
 			{
 				if (str[i] == '{')
 				{
-					m_nodes.push_back(Node(DataType::Object));
-					m_nodes.back().name = "__rootObject";
+					m_nodes.push_back(new Node(DataType::Object));
+					m_nodes.back()->name = "__rootObject";
 					state = State::Key;
 				}
 				else if (str[i] == '[')
 				{
-					m_nodes.push_back(Node(DataType::Array));
-					m_nodes.back().name = "__rootArray";
+					m_nodes.push_back(new Node(DataType::Array));
+					m_nodes.back()->name = "__rootArray";
 					state = State::Value;
 				}
 				else
@@ -505,7 +507,7 @@ public:
 					return; // unexpected char
 				}
 
-				containerStack.push_back(&m_nodes.back());
+				containerStack.push_back(m_nodes.back());
 				break;
 			}
 
@@ -527,10 +529,8 @@ public:
 
 					if (containerStack.size() == 0) // root finished
 						state = State::Done;
-					else if (containerStack.back()->type == DataType::Object)
-						state = State::Key;
-					else // parent is array
-						state = State::Value;
+					else
+						state = State::CommaOrEnd;
 
 					break;
 				}
@@ -548,18 +548,16 @@ public:
 
 					if (containerStack.size() == 0) // root finished
 						state = State::Done;
-					else if (containerStack.back()->type == DataType::Object)
-						state = State::Key;
-					else // parent is array
-						state = State::Value;
+					else
+						state = State::CommaOrEnd;
 
 					break;
 				}
 
 				case '\"':
 				{
-					m_nodes.push_back(Node(DataType::Undefined));
-					curr = &m_nodes.back();
+					m_nodes.push_back(new Node(DataType::Undefined));
+					curr = m_nodes.back();
 					auto len = ParseString(&str[i], curr->name);
 
 					if (len == -1)
@@ -602,8 +600,8 @@ public:
 				{
 					if (curr == nullptr)
 					{
-						m_nodes.push_back(Node(DataType::Object));
-						curr = &m_nodes.back();
+						m_nodes.push_back(new Node(DataType::Object));
+						curr = m_nodes.back();
 					}
 					else
 						curr->type = DataType::Object;
@@ -619,8 +617,8 @@ public:
 				{
 					if (curr == nullptr)
 					{
-						m_nodes.push_back(Node(DataType::Array));
-						curr = &m_nodes.back();
+						m_nodes.push_back(new Node(DataType::Array));
+						curr = m_nodes.back();
 					}
 					else
 						curr->type = DataType::Array;
@@ -645,10 +643,8 @@ public:
 
 					if (containerStack.size() == 0) // root finished
 						state = State::Done;
-					else if (containerStack.back()->type == DataType::Object)
-						state = State::Key;
-					else // parent is array
-						state = State::Value;
+					else
+						state = State::CommaOrEnd;
 
 					break;
 				}
@@ -666,10 +662,8 @@ public:
 
 					if (containerStack.size() == 0) // root finished
 						state = State::Done;
-					else if (containerStack.back()->type == DataType::Object)
-						state = State::Key;
-					else // parent is array
-						state = State::Value;
+					else
+						state = State::CommaOrEnd;
 
 					break;
 				}
@@ -678,8 +672,8 @@ public:
 				{
 					if (curr == nullptr)
 					{
-						m_nodes.push_back(Node(DataType::String));
-						curr = &m_nodes.back();
+						m_nodes.push_back(new Node(DataType::String));
+						curr = m_nodes.back();
 					}
 					else
 						curr->type = DataType::String;
@@ -704,8 +698,8 @@ public:
 				{
 					if (curr == nullptr)
 					{
-						m_nodes.push_back(Node(DataType::Number));
-						curr = &m_nodes.back();
+						m_nodes.push_back(new Node(DataType::Number));
+						curr = m_nodes.back();
 					}
 					else
 						curr->type = DataType::Number;
@@ -735,8 +729,8 @@ public:
 				{
 					if (curr == nullptr)
 					{
-						m_nodes.push_back(Node(DataType::Boolean));
-						curr = &m_nodes.back();
+						m_nodes.push_back(new Node(DataType::Boolean));
+						curr = m_nodes.back();
 					}
 					else
 						curr->type = DataType::Boolean;
@@ -766,8 +760,8 @@ public:
 				{
 					if (curr == nullptr)
 					{
-						m_nodes.push_back(Node(DataType::Null));
-						curr = &m_nodes.back();
+						m_nodes.push_back(new Node(DataType::Null));
+						curr = m_nodes.back();
 					}
 					else
 						curr->type = DataType::Null;
